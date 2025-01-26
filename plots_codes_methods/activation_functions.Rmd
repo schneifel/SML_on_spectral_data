@@ -1,0 +1,111 @@
+---
+title: "Untitled"
+author: "BGS"
+date: "2024-07-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(sigmoid)
+```
+
+```{r}
+input = -5:5
+
+df = data.frame(input, sigmoid(input), sigmoid(input, method = 'ReLU'))
+```
+
+```{r}
+# plot sigmoid function
+ggplot(df, aes(input, sigmoid(input))) + geom_line()
+```
+
+```{r}
+# plot ReLU function
+ggplot(df, aes(input, sigmoid(input, method = 'ReLU'))) + geom_line()
+```
+
+```{r}
+# Define the sigmoid function
+sigmoid <- function(x) {
+  1 / (1 + exp(-x))
+}
+
+# Define the ReLU function
+relu <- function(x) {
+  pmax(0, x)
+}
+```
+
+```{r}
+# Generate input values
+input <- -5:5
+
+# Calculate sigmoid and ReLU outputs
+sigmoid_output <- sigmoid(input)
+relu_output <- relu(input)
+
+# Create a data frame
+df <- data.frame(Input = input, Sigmoid = sigmoid_output, ReLU = relu_output)
+
+# Plotting
+plot(df$Input, df$Sigmoid, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 1), main = "Sigmoid vs ReLU",
+     xlab = "v", ylab = expression(phi[v]))
+lines(df$Input, df$ReLU, col = "red")
+
+legend("topleft", legend = c("Sigmoid", "ReLU"), col = c("blue", "red"), lty = 1)
+```
+
+```{r}
+# Generate input values
+input <- -5:5
+
+# Calculate sigmoid and ReLU outputs
+sigmoid_output <- sigmoid(input)
+relu_output <- relu(input)
+
+# Create a data frame
+df <- data.frame(Input = input, Sigmoid = sigmoid_output, ReLU = relu_output)
+
+# Plotting
+par(mar = c(4.5, 4.5, 2.5, 1))
+plot(df$Input, df$Sigmoid, type = "l", lwd = 1.5, col = "violetred2", xlim = c(-5, 5), ylim = c(-0.02, 1), main = "Sigmoid activation function",
+     xlab =  expression(nu), ylab =  expression(phi(nu)))
+abline(h = 0, v = 0, lty = "dashed", col = "darkgray")
+
+text(x = -5, y = 0.8, labels = expression(phi(nu) == ~ frac(1, ~(1 + exp^{-v}))), adj = c(0, 0), col = c("violetred2"), cex = 0.9)
+```
+
+```{r}
+# Generate input values
+input <- -5:5
+
+# Calculate sigmoid and ReLU outputs
+sigmoid_output <- sigmoid(input)
+relu_output <- relu(input)
+
+# Create a data frame
+df <- data.frame(Input = input, Sigmoid = sigmoid_output, ReLU = relu_output)
+
+# Plotting
+par(mar = c(4.5, 4.5, 2.5, 1))
+plot(df$Input, df$ReLU, type = "l", lwd = 1.5, col = "violetred2", xlim = c(-5, 5), ylim = c(-0.15, 5), main = "ReLU activation function",
+     xlab =  expression(nu), ylab =  expression(phi(nu)))
+abline(h = 0, v = 0, lty = "dashed", col = "darkgray")
+
+text(x = -5, y = 4.35, labels = expression(phi(nu) == "max(0,x)"), adj = c(0, 0), col = c("violetred2"), cex = 0.9)
+```
+
+
+
+
+
+
+
+
+
