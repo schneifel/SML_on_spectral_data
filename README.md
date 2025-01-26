@@ -20,16 +20,16 @@ Normalization of x-data (predictor variables) is included in the scripts where n
 
 ## Contents
 
-- **`R Markdowns`**:
+- **R Markdowns**, model-specific
     - `generalized_additive_model.rmd`: Analysis workflow for optimization and evaluation of GAMs.
     - `convolutional_neural_network.rmd`: Analysis workflow for optimization and evaluation of CNNs.
 
-- **`Scripts`** used for specific tasks:
+- **Scripts** used for specific tasks
     - `install_keras_tuner.R`: Provides full code for installation of tensorflow, keras: R interface to keras, kerastuneR: interface to R
     - `cnn_explainability.R`: Computes feature explanation based on variable permutations using the R package LIME. Code for plot
     generation is included.
 
-- **`Functions`** used for specific tasks:
+- **Functions** used for specific tasks
     - `funBasics.R`: contains all functions applicable for both model types.
         - *calc.rmse*: calculation of RMSE
         - *get.folds*: perform stratified folding based on quantiles of predictor data
