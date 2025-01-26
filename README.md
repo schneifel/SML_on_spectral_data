@@ -15,7 +15,7 @@ For GAMs, everything from tuning to cross-validation to the final model is fully
 For CNNs, after hyperparameter tuning, the model architecture must be constructed manually.
 
 Data preprocessing steps are not part of this project.
-Input data should be a dataframe of one predictor (wavenumber nm$^{-^1}$) and one sample per line.
+Input data should be a dataframe of one predictor (wavenumber) and one sample per line.
 Normalization of x-data (predictor variables) is included in the scripts where necessary.
 
 ## Contents
@@ -74,7 +74,7 @@ Following packages are required:
 This repository is licensed under the GNU General Public License v3.0. You may use, distribute, and modify this code under the terms of the GPL-3.0 license. For more details, see the [LICENSE](./LICENSE) file.
 
 ## Author
-Felicitas Schneider, MSc
+Felicitas Schneider, MSc \\
 65608[at]fhwn.ac.at
 
 
