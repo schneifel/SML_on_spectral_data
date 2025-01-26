@@ -1,0 +1,655 @@
+---
+  title: "Untitled"
+author: "BGS"
+date: "2024-11-18"
+output: html_document
+---
+  
+  
+  ```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, clear workspace, include = FALSE}
+# remove all objects from current workspace
+rm(list=ls())
+```
+
+```{r include=FALSE}
+# load libraries
+library(car)
+library(doParallel)
+library(keras)
+library(kerastuneR)
+library(patchwork)
+library(plyr)
+library(tensorflow)
+library(tidyverse)
+
+# load functions
+source("functions/funBasics.R")
+source("functions/funCNN.R")
+source("functions/funPlots.R")
+
+# load data
+load("data/dataParch.RData")
+```
+
+
+## *Vector normalized spectrum, smoothed, total*
+
+*Note:* The grouping variables were **not** used for model estimation.
+
+```{r include=FALSE}
+# Prepare data for original spectra
+dparFull.df <- data.frame(dparFull[-1])          # exclude column "Group.1"
+
+# split into features (x) and target (y)
+x_data <- dparFull.df[-1]
+y_data <- dparFull.df[1]
+
+# normalize feature data
+mean <- apply(x_data, 2, mean)
+std <- apply(x_data, 2, sd)
+x_data <- scale(x_data, center = mean, scale = std)
+```
+
+```{r eval=FALSE, include=FALSE}
+# create search space
+hp = HyperParameters()
+hp$Int('num_layers', 1L, 3L)
+```
+
+
+## *Hyperparameter tuning*
+
+```{r eval=FALSE, include=FALSE}
+# tune model
+tuner_dparFull = RandomSearch(
+  hypermodel = build.model,
+  hyperparameters = hp,
+  tune_new_entries = T,
+  max_trials = 15,
+  executions_per_trial = 10,
+  seed = 123,
+  objective = 'val_mse',
+  directory = 'convolutional_neural_network',
+  project_name = '01_dparFullOrig')
+
+tuner_dparFull %>% search_summary()
+```
+
+```{r eval=FALSE, include=FALSE}
+# initiate parallelization
+numCores <- detectCores()
+cl <- makeCluster(round(numCores*0.5))
+registerDoParallel(cl)
+print("Parallelization started")
+
+set.seed(123) # seed for data splitting
+tensorflow::tf$random$set_seed(123)   # seed for keras operations
+# fit tuner
+tuner_dparFull %>% fit_tuner(x_data,y_data,
+                             epochs = 25,
+                             batch_size = hp$Int('batch_size', 8, 32, 8),
+                             validation_split = 0.1)
+
+# quit cluster
+stopCluster(cl)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# show results
+result_dparFull = kerastuneR::plot_tuner(tuner_dparFull)
+# plot tuning results
+result_dparFull
+```
+
+```{r eval=FALSE, include=FALSE}
+# Get the best 4 model.
+best_4_models_dparFull = tuner_dparFull %>% get_best_models(4)
+# best_4_models_dparFull
+
+# Get best model
+# pdf("figures/best_model_NN.pdf", width=10, height=20)
+best_4_models_dparFull[[1]] %>% plot_keras_model()
+best_4_models_dparFull[[1]]
+
+# save best model
+best_4_models_dparFull[[1]] %>% save_model_hdf5("models/dparFullOrig.hdf5")
+```
+
+
+## *Determination of optimal number of epochs*
+
+```{r eval=FALSE, include=FALSE}
+# function for model construction
+dparFull.cnn.cv = function() {
+  model <- keras_model_sequential()
+  model %>%
+    layer_gaussian_noise(stddev = 0.01, input_shape = c(ncol(x_data), 1)) %>%
+    layer_conv_1d(name = 'conv1',
+                  filters = 201,
+                  kernel_size = 8,
+                  activation = 'relu',
+                  padding = 'same') %>%
+    layer_max_pooling_1d(name = 'pool1',
+                         pool_size = 4,
+                         strides = 2) %>%
+    layer_conv_1d(name = 'conv2',
+                  filters = 108,
+                  kernel_size = 40,
+                  activation = 'relu',
+                  padding = 'same') %>%
+    layer_max_pooling_1d(name = 'pool2',
+                         pool_size = 5,
+                         strides = 2) %>%
+    layer_conv_1d(name = 'conv3',
+                  filters = 108,
+                  kernel_size = 24,
+                  activation = 'relu',
+                  padding = 'same') %>%
+    layer_max_pooling_1d(name = 'pool3',
+                         pool_size = 3,
+                         strides = 2) %>%
+    layer_dropout(name = 'dropout1',
+                  rate = 0.2) %>%
+    layer_global_average_pooling_1d() %>%
+    layer_flatten() %>%
+    layer_dense(name = 'dense1',
+                units = 192,
+                activation = 'relu') %>%
+    layer_dropout(name = 'dropout2',
+                  rate = 0.5) %>%
+    layer_dense(name = "year", units = 1, activation = 'linear')
+  
+  model %>% compile(
+    loss = 'mse',
+    optimizer = 'rmsprop',
+    metrics = list(
+      keras::metric_root_mean_squared_error(name = "rmse")
+    )
+  )
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+# reshape input features
+y_data <- as.matrix(dparFull.df[1])
+
+# set up basics for k-fold cv
+k <- 5
+num_epochs <- 100
+batch_size <- 8
+
+# run cross-validation
+suppressWarnings({
+  dparFullOrig.cnn.epoch <- cnnCV.fun(x_data, y_data, dparFull.cnn.cv)
+})
+
+save(dparFullOrig.cnn.epoch, file = "data/CNN_epoch_dparFullOrig.RData")
+```
+
+
+```{r}
+# get model history
+curves_orig <- plot.cnn.curves(dparFullOrig.cnn.epoch$history)
+
+# create plots for RMSE over epochs and loss over epochs (learning curves)
+plot_rmse_orig <- curve_orig$curve_rmse
+plot_loss_orig <- curve_orig$curve_loss
+
+# show plots
+plot_rmse_orig
+plot_loss_orig
+
+# adjust number of epochs to optimum as determined in plots_rmse and plot_loss
+optimal_epoch <- 29
+# add vertical line to rmse curve plot
+plot_rmse_vline_orig <- plot_rmse_orig +
+  geom_vline(xintercept = optimal_epoch, color = "azure4", linetype = "dashed", size = 0.8)
+# add vertical line to rmse curve plot
+plot_loss_vline_orig <- plot_loss_orig +
+  geom_vline(xintercept = optimal_epoch, color = "azure4", linetype = "dashed", size = 0.8)
+
+# show final learning curves
+plot_rmse_vline_orig
+plot_loss_vline_orig
+```
+
+
+## *5-fold cross-validation*
+
+```{r eval=FALSE, include=FALSE}
+# reshape input features for cross-validation
+y_data <- as.matrix(dparFull.df[1])
+
+# set up basics for k-fold cv
+k <- 5
+num_epochs <- 30
+batch_size <- 8
+
+# run cross-validation
+suppressWarnings({
+  dparFullOrig.cnn.cv <- cnnCV.fun(x_data, y_data, dparFull.cnn.cv)
+})
+
+save(dparFullOrig.cnn.cv, file = "data/CNN_CV_dparFullOrig.RData")
+```
+
+```{r, echo=FALSE}
+# extract validation predictions
+val_preds_orig <- dparFullOrig.cnn.cv$all_preds_val
+# modify prediction vectors so that all have the same length (add NA to shorter vectors)
+max_length_orig <- max(sapply(val_preds_orig, length))
+padded_preds_orig <- lapply(val_preds_orig, function(preds) {
+  length(preds) <- max_length_orig
+  preds
+})
+
+# create matrix with all prediction vectors
+pred_matrix_orig <- do.call(cbind, padded_preds_orig)
+# calculate prediction variance for individual data points across all folds ignoring the NA
+pred_var_orig <- apply(pred_matrix_orig, 1, function(row) var(row, na.rm = TRUE))
+# calculate mean prediction variance across all data points ignoring the NA
+mean_var_orig <- mean(pred_var_orig, na.rm = TRUE)
+
+print("Prediction Variance for Each Data Point:")
+pred_var_orig
+print("Mean Prediction Variance Across All Data Points:")
+mean_var_orig
+print("Standard deviation of mean prediction variance:")
+sd(pred_var_orig)
+```
+
+
+```{r, echo=FALSE}
+# COMPUTE METRICS
+
+# calculate R-sqared
+cnn_orig_r2_stats <- calc.r2_folds(dparFullorig.cnn.cv)
+# print results
+cnn_orig_r2_stats
+
+# compute RMSE-based results
+cnn_orig_rmse_stats <- cnn.rmse_stats(dparFullorig.cnn.cv)
+# print results
+cnn_orig_rmse_stats
+```
+
+
+#### **Preds vs. Targets per Fold**
+
+```{r, echo = FALSE}
+# plot fold-specific predictions over targets
+plot_folds_orig <- foldwise.plot(dparFullOrig.cnn.cv)
+# print plot
+plot_folds_orig
+```
+
+
+#### **Diagnostic plots**
+
+```{r}
+# create diagnostic plots for cross-validation results
+diagnostics_orig <- diagnostic.plots(model = dparFullOrig.cnn.cv)
+
+# extract plots
+orig_plot1 <- diagnostics_orig$predictions_vs_targets
+orig_plot2 <- diagnostics_orig$qq_plot
+orig_plot3 <- diagnostics_orig$preds_vs_residuals
+orig_plot4 <- diagnostics_orig$histogram_residuals
+
+# print all plots on a 2x2 figure
+(orig_plot1 + orig_plot2) / (orig_plot3 + orig_plot4)
+```
+
+
+## *FINAL MODEL*
+
+```{r include=FALSE}
+# reshape input features for final model
+y_data <- as.matrix(dparFull.df[1])
+
+# normalize feature data
+mean <- apply(x_data, 2, mean)
+std <- apply(x_data, 2, sd)
+x_data <- scale(x_data, center = mean, scale = std)
+```
+
+```{r}
+# call model building function
+cnn_orig_final <- dparFull.cnn.cv()
+
+# initiate parallelization
+numCores <- detectCores()
+cl <- makeCluster(round(numCores*0.38))
+registerDoParallel(cl)
+
+# fit model
+history_final <- cnn_orig_final %>% fit(
+  x_data, y_data,
+  validation_split = 0.1,
+  epochs = num_epochs,
+  batch_size = batch_size,
+  verbose = 1)
+
+# quit clusters
+stopCluster(cl)
+
+cnn_orig_final %>% save_model_hdf5("models/cnn_orig_final.hdf5")
+```
+
+```{r}
+# get model performance metrics
+metricsOrig.final <- cnn_orig_final %>% evaluate(x_data, y_data, batch_size)
+# predict model
+predsOrig.final <- cnn_orig_final %>% predict(x_data, batch_size)
+
+# compute R-squared
+preds <- final_pred_orig
+ss_res <- sum((y_data - preds)^2)          # Residual sum of squares
+ss_tot <- sum((y_data - mean(y_data))^2)    # Total sum of squares
+final_r2 <- 1 - (ss_res / ss_tot)
+round(final_r2, 2)
+```
+
+### **Diagnostic plots**
+
+```{r}
+# create diagnostic plots for cross-validation results
+diag_final_orig <- diagnostic.plots(preds = predsOrig.final, targets = y_data)
+
+# extract plots
+plot1 <- diag_final_orig$predictions_vs_targets
+plot2 <- diag_final_orig$qq_plot
+plot3 <- diag_final_orig$preds_vs_residuals
+plot4 <- diag_final_orig$histogram_residuals
+
+# print all plots on a 2x2 figure
+(plot1 + plot2) / (plot3 + plot4)
+```
+
+
+
+## *Derivative spectra, smoothed, total*
+
+*Note:* The grouping variables were **not** used for model estimation.
+
+```{r include=FALSE}
+# Prepare data for derivative spectra
+dparFullDeriv.df <- data.frame(dparFullDeriv[-1])          # exclude column "Group.1"
+
+# split into features (x) and target (y)
+x_data <- dparFullDeriv.df[-1]
+y_data <- dparFullDeriv.df[1]
+
+# normalize feature data
+mean <- apply(x_data, 2, mean)
+std <- apply(x_data, 2, sd)
+x_data <- scale(x_data, center = mean, scale = std)
+```
+
+```{r, eval=FALSE, include=FALSE}
+# create search space
+hp = HyperParameters()
+hp$Int('num_layers', 1L, 3L)
+```
+
+## **Hyperparameter tuning**
+
+```{r, eval=FALSE, include=FALSE}
+# tune model
+tuner_dparFullDeriv = RandomSearch(
+  hypermodel = build.model,
+  hyperparameters = hp,
+  tune_new_entries = T,
+  max_trials = 15,
+  executions_per_trial = 10,
+  seed = 123,
+  objective = 'val_mse',
+  directory = 'convolutional_neural_network',
+  project_name = '02_dparFullDeriv')
+
+tuner_dparFullDeriv %>% search_summary()
+```
+
+```{r, eval=FALSE, include=FALSE}
+# initiate parallelization
+numCores <- detectCores()
+cl <- makeCluster(round(numCores*0.38))
+registerDoParallel(cl)
+print("Parallelization started")
+
+set.seed(123) # seed for data splitting
+tensorflow::tf$random$set_seed(123)   # seed for keras operations
+# fit tuner
+tuner_dparFullDeriv %>% fit_tuner(x_data,y_data,
+                                  epochs = 25,
+                                  batch_size = hp$Int('batch_size', 8, 32, 8),
+                                  validation_split = 0.1)
+
+# quit cluster
+stopCluster(cl)
+```
+
+```{r, eval=FALSE, include=FALSE}
+# show results
+result_dparFullDeriv = kerastuneR::plot_tuner(tuner_dparFullDeriv)
+# plot tuning results
+result_dparFullDeriv
+```
+
+```{r, eval=FALSE, include=FALSE}
+# Get the best 4 model.
+best_4_models_dparFullDeriv = tuner_dparFullDeriv %>% get_best_models(4)
+# best_4_models_dparFull
+
+# Get best model
+# pdf("figures/best_model_NN.pdf", width=10, height=20)
+best_4_models_dparFullDeriv[[1]] %>% plot_keras_model()
+best_4_models_dparFullDeriv[[1]]
+
+# save best model
+best_4_models_dparFullDeriv[[1]] %>% save_model_hdf5("models/dparFullDeriv.hdf5")
+```
+
+
+## **Determination of optimal number of epochs**
+
+```{r, eval=FALSE, include=FALSE}
+# reshape input features
+y_data <- as.matrix(dparFullDeriv.df[1])
+
+# set up basics for k-fold cv
+k <- 5
+num_epochs <- 100
+batch_size <- 8
+
+suppressWarnings({
+  dparFullDeriv.cnn.epoch <- cnnCV.fun(x_data, y_data, dparFull.cnn.cv)
+})
+
+save(dparFullDeriv.cnn.epoch, file = "data/CNN_epoch_dparFullDeriv.RData")
+```
+
+
+```{r}
+# get model history
+curves_deriv <- plot.cnn.curves(dparFullDeriv.cnn.epoch$history)
+
+# create plots for RMSE over epochs and loss over epochs (learning curves)
+plot_rmse_deriv <- curve_deriv$curve_rmse
+plot_loss_deriv <- curve_deriv$curve_loss
+
+# show plots
+plot_rmse_deriv
+plot_loss_deriv
+
+# adjust number of epochs to optimum as determined in plots_rmse and plot_loss
+optimal_epoch <- 38
+# add vertical line to rmse curve plot
+plot_rmse_vline_deriv <- plot_rmse_deriv +
+    geom_vline(xintercept = optimal_epoch, color = "azure4", linetype = "dashed", size = 0.8)
+# add vertical line to rmse curve plot
+plot_loss_vline_deriv <- plot_loss_deriv +
+    geom_vline(xintercept = optimal_epoch, color = "azure4", linetype = "dashed", size = 0.8)
+
+# show final learning curves
+plot_rmse_vline_deriv
+plot_loss_vline_deriv
+```
+
+
+## **5-fold cross-validation**
+
+```{r eval=FALSE, include=FALSE}
+# reshape input features for cross-validation
+y_data <- as.matrix(dparFullDeriv.df[1])
+
+# set up basics for k-fold cv
+k <- 5
+num_epochs <- 39
+batch_size <- 8
+
+# run cross-validation
+suppressWarnings({
+  dparFullDeriv.cnn.cv <- cnnCV.fun(x_data, y_data, dparFull.cnn.cv)
+})
+
+save(dparFullDeriv.cnn.cv, file = "data/CNN_CV_dparFullDeriv.RData")
+```
+
+```{r, echo=FALSE}
+# extract validation predictions
+val_preds_deriv <- dparFullDeriv.cnn.cv$all_preds_val
+# modify prediction vectors so that all have the same length (add NA to shorter vectors)
+max_length_deriv <- max(sapply(val_preds_deriv, length))
+padded_preds_deriv <- lapply(val_preds_deriv, function(preds) {
+    length(preds) <- max_length_deriv
+    preds
+})
+
+# create matrix with all prediction vectors
+pred_matrix_deriv <- do.call(cbind, padded_preds_deriv)
+# calculate prediction variance for individual data points across all folds ignoring the NA
+pred_var_deriv <- apply(pred_matrix_deriv, 1, function(row) var(row, na.rm = TRUE))
+# calculate mean prediction variance across all data points ignoring the NA
+mean_var_deriv <- mean(pred_var_deriv, na.rm = TRUE)
+
+print("Prediction Variance for Each Data Point:")
+pred_var_deriv
+print("Mean Prediction Variance Across All Data Points:")
+mean_var_deriv
+print("Standard deviation of mean prediction variance:")
+sd(pred_var_deriv)
+```
+
+```{r}
+# COMPUTE METRICS
+
+# calculate R-sqared
+cnn_deriv_r2_stats <- calc.r2_folds(dparFullderiv.cnn.cv)
+# print results
+cnn_deriv_r2_stats
+
+# compute RMSE-based results
+cnn_deriv_rmse_stats <- cnn.rmse_stats(dparFullderiv.cnn.cv)
+# print results
+cnn_deriv_rmse_stats
+```
+
+#### **Preds vs. Targets per Fold**
+
+```{r, echo = FALSE}
+# plot fold-specific predictions over targets
+plot_folds_deriv <- foldwise.plot(dparFullDeriv.cnn.cv)
+# print plot
+plot_folds_deriv
+```
+
+
+#### **Diagnostic plots**
+
+```{r}
+# create diagnostic plots for cross-validation results
+diagnostics_deriv <- diagnostic.plots(model = dparFullDeriv.cnn.cv)
+
+# extract plots
+deriv_plot1 <- diagnostics_deriv$predictions_vs_targets
+deriv_plot2 <- diagnostics_deriv$qq_plot
+deriv_plot3 <- diagnostics_deriv$preds_vs_residuals
+deriv_plot4 <- diagnostics_deriv$histogram_residuals
+
+# print all plots on a 2x2 figure
+(deriv_plot1 + deriv_plot2) / (deriv_plot3 + deriv_plot4)
+```
+
+
+## *FINAL MODEL*
+
+```{r include=FALSE}
+# reshape input features for final model
+y_data <- as.matrix(dparFullDeriv.df[1])
+
+# normalize feature data
+mean <- apply(x_data, 2, mean)
+std <- apply(x_data, 2, sd)
+x_data <- scale(x_data, center = mean, scale = std)
+```
+
+```{r}
+# call model building function
+cnn_deriv_final <- dparFull.cnn.cv()
+
+# initiate parallelization
+numCores <- detectCores()
+cl <- makeCluster(round(numCores*0.38))
+registerDoParallel(cl)
+
+# fit model
+history_final_deriv <- cnn_deriv_final %>% fit(
+    x_data, y_data,
+    validation_split = 0.1,
+    epochs = num_epochs,
+    batch_size = batch_size,
+    verbose = 1)
+
+# quit clusters
+stopCluster(cl)
+
+cnn_deriv_final %>% save_model_hdf5("models/cnn_deriv_final.hdf5")
+```
+
+
+```{r}
+# get model performance metrics
+metricsDeriv.final <- cnn_deriv_final %>% evaluate(x_data, y_data, batch_size)
+# predict model
+predsDeriv.final <- cnn_deriv_final %>% predict(x_data, batch_size)
+
+# compute R-squared
+preds <- final_pred_deriv
+ss_res <- sum((y_data - preds)^2)          # Residual sum of squares
+ss_tot <- sum((y_data - mean(y_data))^2)    # Total sum of squares
+final_r2 <- 1 - (ss_res / ss_tot)
+round(final_r2, 2)
+```
+
+
+### **Diagnostic plots**
+
+```{r}
+# create diagnostic plots for cross-validation results
+diag_final_deriv <- diagnostic.plots(preds = predsDeriv.final, targets = y_data)
+
+# extract plots
+plot1 <- diag_final_deriv$predictions_vs_targets
+plot2 <- diag_final_deriv$qq_plot
+plot3 <- diag_final_deriv$preds_vs_residuals
+plot4 <- diag_final_deriv$histogram_residuals
+
+# print all plots on a 2x2 figure
+(plot1 + plot2) / (plot3 + plot4)
+```

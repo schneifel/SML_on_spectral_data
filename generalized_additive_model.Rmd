@@ -1,0 +1,1082 @@
+---
+title: "GAM parchment data"
+author: "Felicitas Schneider"
+date: "`r Sys.Date()`"
+fontsize: 10pt
+mainfont: Arial
+output:
+  pdf_document:
+    df_print: kable
+    highlight: tango
+  html_document: default
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# clear environment
+rm(list = ls())
+```
+
+
+```{r, load libraries, data and functions}
+# load packages
+library(car)
+library(caret)
+library(doParallel)
+library(heatmaply)
+library(mboost)
+library(patchwork)
+library(plyr)
+library(tidyverse)
+
+# load functions
+source("functions/funBasics.R")
+source("functions/funGam.R")
+source("functions/funPlots.R")
+
+# load data
+load("data/dataParch.RData")
+
+# subset spectral data
+dparFull_GAM.df <- data.frame(dparFull[-1])          # exclude column "Group.1"
+dparFull_gam.df <- dparFull_GAM.df[, c(1, seq(2, ncol(dparFull_GAM.df), by = 2))]
+
+dparFullDeriv_GAM.df <- data.frame(dparFullDeriv[-1])
+dparFullDeriv_gam.df <- dparFullDeriv_GAM.df[, c(1, seq(2, ncol(dparFullDeriv_GAM.df), by = 2))]
+```
+
+## *Vector normalized spectra, smoothed, total*
+
+*Note:* The grouping variables were **not** used for model estimation.
+
+### *Hyperparameter tuning*
+
+```{r}
+# reshape data for caret hyperparameter tuning
+predictors <- setdiff(names(dparFull_gam.df), "year")
+x_data = dparFull_gam.df[, predictors]
+y_data <- as.numeric(dparFull_gam.df$year)
+```
+
+
+```{r}
+# perform random search hyper parameter tuning
+set.seed(4023)
+suppressWarnings({
+  dparFullOrig.tune <- train(x_data, y_data,
+                     method = tune.gamboost,
+                     preProc = c("center", "scale"),
+                     trControl = CV.fit.control,     # k-fold CV
+                     tuneLength = 60,
+                     metric = "RMSE"
+  )
+})
+
+best_hp_dparFullOrig <- dparFullOrig.tune$bestTune
+save(dparFullOrig.tune, best_hp_dparFullOrig, file = "data/GAM_tune_dparFullOrig.RData")
+```
+
+
+```{r}
+# plot results from hyperparameter tuning
+ggplot(dparFullOrig.tune, aes(x = tuned_parameter, y = metric)) +
+     geom_point() +
+     geom_smooth(method = "loess", se = FALSE, color = "deeppink", linewidth = 0.2) +  # Add a smoothing line
+     theme_minimal()
+```
+
+
+
+### *Optimization of boosting iterations*
+
+```{r}
+load(file = "data/GAM_tune_dparFullOrig.RData")
+
+#reshape data for cross-validation
+x_data <- dparFull_gam.df[-1]
+y_data <- dparFull_gam.df$year
+
+# set up basics for k-fold cv
+k <- 5
+mstop_max <- 600
+
+# run cross-validation for determination of mstop
+suppressWarnings({
+  system.time(dparFull.gam.mstop <- gamCV.fun(x_data, y_data, best_hp_dparFullOrig))
+})
+ 
+save(dparFull.gam.mstop, file = "data/GAM_mstop_dparFullOrig.RData")
+```
+
+
+```{r}
+# plot learning curves and determine iteration number at validation error minimum
+learning_curves_Orig <- plot.gam.curves(dparFull.gam.mstop)
+learning_curves_Orig
+```
+
+
+### *5-fold cross-validation*
+
+```{r}
+# set up basics for k-fold cv
+k <- 5
+mstop_max <- learning_curves_Orig$it_lowest_rmse + 15
+
+# run cross-validation
+suppressWarnings({
+  system.time(dparFullorig.gam.cv <- gamCV.fun(x_data, y_data, best_hp_dparFullOrig))
+})
+
+save(dparFullorig.gam.cv, file = "data/GAM_CV_dparFullOrig.RData")
+```
+
+
+```{r}
+# COMPUTE metrics
+
+# calculate R-squared for each fold and overall
+fold_preds <- lapply(dparFullorig.gam.cv$all_preds_val, function(fold) {
+      # Compute the mean across iterations (across columns for each position)
+      rowMeans(do.call(cbind, fold))
+    })
+fold_preds <- as.matrix(fold_preds)
+
+#COMPUTE R-SQUARED
+# extract predictions and targets of each fold
+R2_cv_orig <- c((cor(unlist(fold_preds[1]),
+                    unlist(dparFullorig.gam.cv$all_targets_val[1])))^2,
+                (cor(unlist(fold_preds[2]),
+                    unlist(dparFullorig.gam.cv$all_targets_val[2])))^2,
+                (cor(unlist(fold_preds[3]),
+                    unlist(dparFullorig.gam.cv$all_targets_val[3])))^2,
+                (cor(unlist(fold_preds[4]),
+                    unlist(dparFullorig.gam.cv$all_targets_val[4])))^2,
+                (cor(unlist(fold_preds[5]),
+                    unlist(dparFullorig.gam.cv$all_targets_val[5])))^2
+)
+
+# calculate mean and standard deviation
+meanR2_cv_orig <- mean(R2_cv_orig)
+sdR2_cv_orig <- sd(R2_cv_orig)
+
+# print results
+round(R2_cv_orig, 2)
+round(meanR2_cv_orig, 4)
+round(sdR2_cv_orig, 2)
+
+# compute RMSE-based results
+gam_orig_rmse_stats <- gam.rmse_stats(dparFullorig.gam.cv, k)
+# print results
+gam_orig_rmse_stats
+```
+
+```{r}
+# COMPUTE PREDICTION VARIANCES
+
+# average rmse across all iterations for each fold
+val_preds_orig <- val_preds <- lapply(dparFullorig.gam.cv$all_preds_val, function(fold) {
+    rowMeans(do.call(cbind, fold))  # Row-wise mean across all iterations
+})
+
+# determine maximum length of predictions across folds and pad shorter vectors with NA
+max_length_orig <- max(sapply(val_preds_orig, length))
+padded_preds_orig <- lapply(val_preds_orig, function(preds) {
+    length(preds) <- max_length_orig  # Extend vector to max length with NA
+    preds
+})
+
+# combine predictions into matrix
+pred_matrix_orig <- do.call(cbind, padded_preds_orig)
+
+# compute variance across folds (ignoring NA)
+prediction_variance_orig <- apply(pred_matrix_orig, 1, function(row) var(row, na.rm = TRUE))
+
+# calculate average variance across all validation data points
+mean_variance_orig <- mean(prediction_variance_orig, na.rm = TRUE)
+
+# print results
+print("Prediction Variance for Each Data Point:")
+print(prediction_variance_orig)
+print("Mean Prediction Variance Across All Data Points:")
+print(mean_variance_orig)
+print("Standard deviation of mean prediction variance:")
+print(sd(prediction_variance_orig))
+```
+
+
+#### **Preds vs. Targets per Fold**
+
+```{r}
+# plot fold-specific predictions over targets
+fold_preds_Orig_final <- foldwise.plot(dparFullorig.gam.cv)
+# print plot
+fold_preds_Orig_final
+```
+
+
+#### **Diagnostic plots**
+
+```{r}
+# create diagnostic plots for cross-validation results
+diagnostics_orig <- diagnostic.plots(model = dparFullorig.gam.cv)
+
+# extract plots
+orig_plot1 <- diagnostics_orig$predictions_vs_targets
+orig_plot2 <- diagnostics_orig$qq_plot
+orig_plot3 <- diagnostics_orig$preds_vs_residuals
+orig_plot4 <- diagnostics_orig$histogram_residuals
+
+# print all plots on a 2x2 figure
+(orig_plot1 + orig_plot2) / (orig_plot3 + orig_plot4)
+```
+
+
+#### **Permutation importance**
+
+```{r}
+# COMPUTE PERMUTATION IMPORTANCE
+
+# extract names of top15 BL for partial effect plots (need complete variable name)
+top15_BL <- names(sort(dparFullorig.gam.cv$permutation_importance, decreasing = TRUE))[1:15]
+
+# extract permutation importance results from CV object
+varimp.df <- data.frame(sort(dparFullorig.gam.cv$permutation_importance, decreasing = TRUE))
+varimp.df$baselearner <- rownames(varimp.df)
+varimp.df <- varimp.df[, c(2, 1)]
+rownames(varimp.df) <- NULL
+colnames(varimp.df) <- c("baselearner", "importance")
+
+# remove all rows with 0 and clear names
+varimp.df <- varimp.df[apply(varimp.df!=0, 1, all),]
+varimp.df$baselearner <- gsub("(\\d+\\.\\d{2})\\d*", "\\1", varimp.df$baselearner)
+
+# Create top15 varimp dataframe and category "others"
+top15_varimp <- rbind(
+  varimp.df[1:15,],
+  data.frame(baselearner = "others", 
+             importance = sum(varimp.df$importance[16:nrow(varimp.df)]))
+)
+```
+
+```{r}
+# calculate 10% threshold to identify variables of low importance
+orig_cv_low_imp <- calc.threshold(varimp.df)
+
+print(orig_cv_threshold <- orig_cv_low_imp$threshold)
+print(orig_cv_low_variables <- orig_cv_low_imp$low_scores)
+```
+
+```{r}
+# create plot for top15 predictors
+varimp15_cv_orig <-
+  top15_varimp %>%
+  mutate(baselearner = factor(baselearner, levels = rev(baselearner))) %>%
+  
+  ggplot( aes(
+    x = baselearner, y = importance, fill = baselearner)) +
+  geom_bar(stat = "identity") +
+  guides(fill = "none") +
+  labs(x = "") +
+  coord_flip() + 
+  labs(
+    x = "Base-learner",
+    y = "Increase in RMSE (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.8),
+    panel.grid.minor = element_line(color = "gray80", linewidth = 0.2),
+    axis.title.x = element_text(size = 30),
+    axis.title.y = element_text(size = 30),
+    axis.text.x = element_text(size = 28),
+    axis.text.y = element_text(size = 28)) +
+  scale_y_continuous(breaks = seq(0, 9, by = 1))
+
+# create plot for all predictors
+varimp_cv.orig <-
+  varimp.df %>%
+  mutate(baselearner = factor(baselearner, levels = rev(baselearner))) %>%
+  
+  ggplot( aes(
+    x = baselearner, y = importance, fill = baselearner)) +
+  geom_bar(stat = "identity") +
+  geom_vline(xintercept = "X3281.84", col = "royalblue", linetype = "dashed", linewidth = 2) +
+  annotate("text", x = "X1685.04", y = 6.5, label = "Top 15 Baselearner", vjust = -0.5, col = "mediumseagreen", size = 12) +
+  geom_hline(yintercept = seq(-2, 9, 0.5), col = "grey75", linewidth = 0.2) +
+  geom_hline(yintercept = seq(-2, 9, 1), col = "grey65", linewidth = 0.5) +
+  geom_curve(aes(x = "X1570.11", xend = "X1471.59", y = 8.2, yend = 7.2),
+               col = "mediumseagreen", linewidth = 1.5, curvature = 0.5,
+             arrow = arrow(length = unit(0.55, "cm"), type = "open")) +
+  guides(fill = "none") +
+  labs(x = "") +
+  coord_flip() +
+  labs(
+    x = "Base-learner",
+    y = "Increase in RMSE (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(size = 30),
+    axis.title.y = element_text(size = 30),
+    axis.text.x = element_text(size = 28)) +
+  scale_y_continuous(breaks = seq(-2, 9, by = 1))
+
+# print plots
+varimp15_cv_orig
+varimp_cv.orig
+```
+
+
+#### **Check for colinearity**
+
+```{r}
+# identify coefficients of CV models
+coef <- data.frame(coef(dparFullorig.gam.cv$all_models[[1]]))
+
+# convert to matrix and calculate correlation coefficients
+coef_matrix <- as.matrix(coef)
+coef_corr <- cor(t(coef_matrix))
+
+# create interactive heatmap
+heatmaply(coef_corr,
+          k_col = 5, k_row = 5, # Cluster columns and rows
+          colors = colorRampPalette(c("#3BB351", "#1EE6BE", "#6B8CDB", "#9E7BC9", "#C17BC9", "#F1A3BD"))(256),
+          main = "Fold 1",
+          xlab = "Feature index",
+          ylab = "Feature index")
+```
+
+
+### *FINAL MODEL*
+
+```{r}
+# create formula and control objects with best hyperparameters
+model.settings <- get.settings(dparFull_gam.df,
+                               best_hp_dparFullOrig,
+                               mstop_max)
+# check formula and control
+# model.settings$formula
+# model.settings$control
+# model.settings$formula[[3]][[3]][[3]]  # show value for knots
+# model.settings$formula[[3]][[3]][[4]]  # show value for df
+
+# Training the final model with identified optimal hyperparameter configuration
+set.seed(936)
+system.time(gam_orig_final <- gamboost(model.settings$formula,
+                                   dparFull_gam.df,
+                                   control = model.settings$control))
+# summary(orig_final)
+
+save(gam_orig_final, file="data/gam_orig_final.RData")
+```
+
+
+#### **PREDICTIONS - final**
+
+```{r}
+# predict model
+predsOrig.final <- predict(gam_orig_final, dparFull_gam.df)
+# calculate residuals
+residsOrig.final <- y_data - predsOrig.final
+
+# calculate final metrics
+RMSE.final <- calc.rmse(y_data, predsOrig.final)
+R2.final <- (cor(predsOrig.final, y_data))^2
+MAE.final <- mean(abs(y_data - predsOrig.final))
+
+cat("Metrics final Model - VN data", "\n")
+cat("RMSE:", round(RMSE.final, 2), "\n")
+cat("R2:", round(R2.final, 2), "\n")
+cat("Mean absolute error:", round(MAE.final, 2), "\n")
+```
+
+
+#### **Diagnostic plots final model**
+
+```{r}
+# create diagnostic plots for cross-validation results
+diag_final_orig <- diagnostic.plots(preds = predsOrig.final, targets = y_data)
+
+# extract plots
+plot1 <- diag_final_orig$predictions_vs_targets
+plot2 <- diag_final_orig$qq_plot
+plot3 <- diag_final_orig$preds_vs_residuals
+plot4 <- diag_final_orig$histogram_residuals
+
+# print all plots on a 2x2 figure
+(plot1 + plot2) / (plot3 + plot4)
+```
+
+
+
+#### **Permutation importance final model**
+
+```{r}
+# compute baseline predictions and RMSE for permutation importance
+baseline_preds_orig_final <- predict(gam_orig_final, newdata = x_data)
+baseline_rmse_orig_final <- calc.rmse(y_data, baseline_preds_orig_final)
+
+# Create an empty vector to store variable importance
+varImp_orig_final <- numeric(1730)    # every second predictor: 3460/2
+names(varImp_orig_final) <- colnames(dparFull_gam.df[-1])
+
+suppressWarnings({
+  set.seed(1258)
+  # compute permutation importance for each variable
+  for (i in seq_along(colnames(x_data))) {
+    cat("iteration", i, "\n")
+    # Permute the i-th variable
+    permuted_data <- x_data
+    permuted_data[, i] <- sample(permuted_data[, i])
+    
+    # Compute predictions and RMSE on permuted data
+    permuted_predictions <- predict(gam_orig_final, newdata = permuted_data)
+    permuted_rmse <- calc.rmse(y_data, permuted_predictions)
+    
+    # Compute the increase in RMSE (risk reduction percentage)
+    varImp_orig_final[i] <- ((permuted_rmse - baseline_rmse) / baseline_rmse) * 100
+  }
+})
+
+# Sort the variable importance in descending order
+varImp_orig_final_sorted <- sort(varImp_orig_final, decreasing = TRUE)
+
+# extract names of top15 BL for partial effect plots (need complete variable name)
+top15_BL <- names(varImp_orig_final_sorted)[1:15]
+
+# create data frame
+varimp_orig_final.df <- data.frame(varImp_orig_final_sorted)
+varimp_orig_final.df$variable <- rownames(varimp_orig_final.df)
+varimp_orig_final.df <- varimp_orig_final.df[, c(2, 1)]
+rownames(varimp_orig_final.df) <- NULL
+colnames(varimp_orig_final.df) <- c("variable", "importance")
+
+# remove all rows with 0
+varimp_orig_final.df <- varimp_orig_final.df[apply(varimp_orig_final.df!=0, 1, all),]
+varimp_orig_final.df$variable <- gsub("(\\d+\\.\\d{2})\\d*", "\\1", varimp_orig_final.df$variable)
+
+# Create top15 varimp dataframe and category "others"
+top15_varImp_orig_final.df <- rbind(
+  varimp_orig_final.df[1:15,],
+  data.frame(variable = "others", importance = sum(varimp_orig_final.df$importance[16:nrow(varimp_orig_final.df)]))
+)
+```
+
+```{r}
+# calculate 10% threshold to identify variables of low importance
+orig_final_low_imp <- calc.threshold(varimp_orig_final.df)
+
+print(orig_final_threshold <- orig_final_low_imp$threshold)
+print(orig_final_low_variables <- orig_final_low_imp$low_scores)
+```
+
+```{r}
+# create plot for top15 predictors
+varimp15_orig_final <-
+  top15_varImp_orig_final.df %>%
+  mutate(variable = factor(variable, levels = rev(variable))) %>%
+  
+  ggplot(aes(
+    x = variable, y = importance, fill = variable)) +
+  geom_bar(stat = "identity") +
+  guides(fill = "none") +
+  labs(x = "") +
+  coord_flip() + 
+  labs(
+    x = "Base-learner",
+    y = "Increase in RMSE (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.8),
+    panel.grid.minor = element_line(color = "gray80", linewidth = 0.2),
+    axis.title.x = element_text(size = 30),
+    axis.title.y = element_text(size = 30),
+    axis.text.x = element_text(size = 28),
+    axis.text.y = element_text(size = 28)) +
+  scale_y_continuous(breaks = seq(0, 60, by = 5))
+
+# create plot for all predictors
+varimp_orig_final <-
+  varimp_orig_final.df %>%
+  mutate(variable = factor(variable, levels = rev(variable))) %>%
+  
+  ggplot(aes(
+    x = variable, y = importance, fill = variable)) +
+  geom_bar(stat = "identity") +
+  geom_vline(xintercept = "X790.18", col = "salmon", linetype = "dashed", linewidth = 2) +
+  annotate("text", x = "X1574.21", y = 43, label = "Top 15 Baselearner", vjust = -0.5, col = "mediumseagreen", size = 12) +
+  geom_hline(yintercept = seq(0, 60, 5), col = "grey65") +
+  guides(fill = "none") +
+  labs(x = "") +
+  coord_flip() +
+  labs(
+    x = "Base-learner",
+    y = "Increase in RMSE (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(size = 30),
+    axis.title.y = element_text(size = 30),
+    axis.text.x = element_text(size = 28)) +
+  scale_y_continuous(breaks = seq(0, 60, by = 5))
+
+# print plots
+varimp15_orig_final
+varimp_orig_final
+```
+
+
+#### **Partial effects plots**
+
+```{r}
+# create partial effect plots of top4 BL
+par(mfrow = c(2,2), mar = c(4, 5, 1.5, 1.5))
+plot(gam_orig_final, which = "X1693.258",
+     col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+plot(gam_orig_final, which = "X1471.595",
+     col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+plot(gam_orig_final, which = "X876.38900000000001",
+     col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+plot(gam_orig_final, which = "X1726.097",
+     col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+
+```
+
+
+
+## *Derivative spectrum, smoothed, total*
+
+*Note:* The grouping variables were **not** used for model estimation.
+
+### *Hyperparameter tuning*
+
+```{r}
+# reshape data for caret hyperparameter tuning
+predictors <- setdiff(names(dparFullDeriv_gam.df), "year")
+x_data = dparFullDeriv_gam.df[, predictors]
+y_data <- as.numeric(dparFullDeriv_gam.df$year)
+```
+
+
+```{r, tuning dparFullDeriv}
+# perform random search hyper parameter tuning
+set.seed(4023)
+suppressWarnings({
+  dparFullDeriv.tune <- train(x_dataDeriv, y_dataDeriv,
+                               method = tune.gamboost,
+                               preProc = c("center", "scale"),
+                               trControl = CV.fit.control,     # k-fold CV
+                               tuneLength = 60,
+                               metric = "RMSE"
+  )
+})
+
+best_hp_dparFullDeriv <- dparFullDeriv.tune$bestTune
+
+save(dparFullDeriv.tune, best_hp_dparFullDeriv, file = "data/GAM_tune_dparFullDeriv.RData")
+```
+
+
+### *Optimization of boosting iterations*
+
+```{r}
+load(file = "data/GAM_tune_dparFullDeriv.RData")
+
+#reshape data for cross-validation
+x_data <- dparFullDeriv_gam.df[-1]
+y_data <- dparFullDeriv_gam.df$year
+
+# set up basics for k-fold cv
+k <- 5
+mstop_max <- 225
+
+# run cross-validation for determination of mstop
+suppressWarnings({
+  system.time(dparFullDeriv.gam.mstop <- gamCV.fun(x_data, y_data, best_hp_dparFullDeriv))
+})
+
+save(dparFullDeriv.gam.cv, file = "data/GAM_CV_dparFullDeriv.RData")
+```
+
+```{r}
+# plot learning curves and determine iteration number at validation error minimum
+learning_curves_Deriv <- plot.gam.curves(dparFullDeriv.gam.mstop)
+learning_curves_Deriv
+```
+
+
+### *5-fold cross-validation*
+
+```{r, *k*-fold CV derivative spectra - opt. mstop}
+# set up basics for k-fold cv
+k <- 5
+mstop_max <- learning_curves_Deriv$it_lowest_rmse + 15
+
+# run cross-validation
+suppressWarnings({
+    system.time(dparFullderiv.gam.cv <- gamCV.fun(x_data, y_data, best_hp_dparFullDeriv))
+})
+
+save(dparFullderiv.gam.cv, file = "data/GAM_CV_dparFullDeriv.RData")
+```
+
+
+```{r}
+# CALCULATE METRICS
+
+# calculate R-squared for each fold and overall
+fold_preds_deriv <- lapply(dparFullderiv.gam.cv$all_preds_val, function(fold) {
+        # Compute the mean across iterations (across columns for each position)
+        rowMeans(do.call(cbind, fold))
+    })
+fold_preds_deriv <- as.matrix(fold_preds_deriv)
+
+# extract predictions and targets of each fold
+R2_cv_deriv <- c((cor(unlist(fold_preds_deriv[1]),
+                    unlist(dparFullderiv.gam.cv$all_targets_val[1])))^2,
+                (cor(unlist(fold_preds_deriv[2]),
+                    unlist(dparFullderiv.gam.cv$all_targets_val[2])))^2,
+                (cor(unlist(fold_preds_deriv[3]),
+                    unlist(dparFullderiv.gam.cv$all_targets_val[3])))^2,
+                (cor(unlist(fold_preds_deriv[4]),
+                    unlist(dparFullderiv.gam.cv$all_targets_val[4])))^2,
+                (cor(unlist(fold_preds_deriv[5]),
+                    unlist(dparFullderiv.gam.cv$all_targets_val[5])))^2
+)
+
+# calculate mean and standard deviation
+meanR2_cv_deriv <- mean(R2_cv_deriv)
+sdR2_cv_deriv <- sd(R2_cv_deriv)
+
+# print results
+round(R2_cv_deriv, 2)
+round(meanR2_cv_deriv, 4)
+round(sdR2_cv_deriv, 2)
+
+# compute RMSE-based results
+gam_deriv_rmse_stats <- gam.rmse_stats(dparFullderiv.gam.cv, k)
+# print results
+gam_deriv_rmse_stats
+```
+
+```{r}
+# COMPUTE PREDICTION VARIANCES
+
+# average rmse across all iterations for each fold
+val_preds_deriv <- val_preds <- lapply(dparFullderiv.gam.cv$all_preds_val, function(fold) {
+    rowMeans(do.call(cbind, fold))  # Row-wise mean across all iterations
+})
+
+# determine maximum length of predictions across folds and pad shorter vectors with NA
+max_length_deriv <- max(sapply(val_preds_deriv, length))
+padded_preds_deriv <- lapply(val_preds_deriv, function(preds) {
+    length(preds) <- max_length_deriv  # Extend vector to max length with NA
+    preds
+})
+
+# combine predictions into matrix
+pred_matrix_deriv <- do.call(cbind, padded_preds_deriv)
+
+# compute variance across folds (ignoring NA)
+prediction_variance_deriv <- apply(pred_matrix_deriv, 1, function(row) var(row, na.rm = TRUE))
+
+# calculate average variance across all validation data points
+mean_variance_deriv <- mean(prediction_variance_deriv, na.rm = TRUE)
+
+# print results
+print("Prediction Variance for Each Data Point:")
+print(prediction_variance_deriv)
+print("Mean Prediction Variance Across All Data Points:")
+print(mean_variance_deriv)
+print("Standard deviation of mean prediction variance:")
+print(sd(prediction_variance_deriv))
+```
+
+
+#### **Preds vs. Targets per Fold**
+
+```{r}
+# plot fold-specific predictions over targets
+fold_preds_Deriv_final <- foldwise.plot(dparFullderiv.gam.cv)
+# print plot
+fold_preds_Deriv_final
+```
+
+
+#### **Diagnostic plots**
+
+```{r}
+# create diagnostic plots for cross-validation results
+diagnostics_deriv <- diagnostic.plots(model = dparFullderiv.gam.cv)
+
+# extract plots
+deriv_plot1 <- diagnostics_deriv$predictions_vs_targets
+deriv_plot2 <- diagnostics_deriv$qq_plot
+deriv_plot3 <- diagnostics_deriv$preds_vs_residuals
+deriv_plot4 <- diagnostics_deriv$histogram_residuals
+
+# print all plots on a 2x2 figure
+(deriv_plot1 + deriv_plot2) / (deriv_plot3 + deriv_plot4)
+```
+
+
+#### **Permutation importance**
+
+```{r}
+# extract names of top15 BL for partial effect plots (need complete variable name)
+top10_BL_deriv <- names(sort(dparFullderiv.gam.cv$permutation_importance, decreasing = TRUE))[1:10]
+
+# extract permutation importance results from CV object
+varimpDeriv.df <- data.frame(sort(dparFullderiv.gam.cv$permutation_importance, decreasing = TRUE))
+varimpDeriv.df$baselearner <- rownames(varimpDeriv.df)
+varimpDeriv.df <- varimpDeriv.df[, c(2, 1)]
+rownames(varimpDeriv.df) <- NULL
+colnames(varimpDeriv.df) <- c("baselearner", "importance")
+
+# remove all rows with 0 and clear names
+varimpDeriv.df <- varimpDeriv.df[apply(varimpDeriv.df!=0, 1, all),]
+varimpDeriv.df$baselearner <- gsub("(\\d+\\.\\d{2})\\d*", "\\1", varimpDeriv.df$baselearner)
+
+# Create top10 varimp dataframe and category "others"
+top10_varimpDeriv <- rbind(
+    varimpDeriv.df[1:10,],
+    data.frame(baselearner = "others", 
+                importance = sum(varimpDeriv.df$importance[11:nrow(varimpDeriv.df)]))
+)
+```
+
+```{r}
+# calculate 10% threshold to identify variables of low importance
+deriv_cv_low_imp <- calc.threshold(varimpDeriv.df)
+
+print(deriv_cv_threshold <- deriv_cv_low_imp$threshold)
+print(deriv_cv_low_variables <- deriv_cv_low_imp$low_scores)
+```
+
+```{r}
+# create plot for top10 predictors
+varimp10_cv_deriv <-
+  top10_varimpDeriv %>%
+  mutate(baselearner = factor(baselearner, levels = rev(baselearner))) %>%
+
+  ggplot( aes(
+    x = baselearner, y = importance, fill = baselearner)) +
+  geom_bar(stat = "identity") +
+  guides(fill = "none") +
+  labs(x = "") +
+  coord_flip() + 
+  labs(
+    x = "Base-learner",
+    y = "Increase in RMSE (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.8),
+    panel.grid.minor = element_line(color = "gray80", linewidth = 0.2),
+    axis.title.x = element_text(size = 30),
+    axis.title.y = element_text(size = 30),
+    axis.text.x = element_text(size = 28),
+    axis.text.y = element_text(size = 28)) +
+  scale_y_continuous(breaks = seq(-4, 7.5, by = 1))
+
+# create plot for all predictors
+varimp_cv.deriv <-
+  varimpDeriv.df %>%
+  mutate(baselearner = factor(baselearner, levels = rev(baselearner))) %>%
+  
+  ggplot( aes(
+    x = baselearner, y = importance, fill = baselearner)) +
+  geom_bar(stat = "identity") +
+  geom_vline(xintercept = "X7464.70", col = "royalblue", linetype = "dashed", linewidth = 2) +
+  annotate("text", x = "X7062.42", y = 5.3, label = "Top 10 Baselearner", vjust = -0.5, col = "mediumseagreen", size = 11) +
+  geom_hline(yintercept = seq(-1, 7, 0.5), col = "grey75", linewidth = 0.2) +
+  geom_hline(yintercept = seq(-1, 7, 1), col = "grey65", linewidth = 0.5) +
+  geom_curve(aes(x = "X6270.18", xend = "X7456.49", y = 6.6, yend = 5.6),
+               col = "mediumseagreen", linewidth = 1.5, curvature = 0.5,
+             arrow = arrow(length = unit(0.55, "cm"), type = "open")) +
+  guides(fill = "none") +
+  labs(x = "") +
+  coord_flip() +
+  labs(
+    x = "Base-learner",
+    y = "Increase in RMSE (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(size = 30),
+    axis.title.y = element_text(size = 30),
+    axis.text.x = element_text(size = 28)) +
+  scale_y_continuous(breaks = seq(-1, 7.5, by = 1))
+
+varimp10_cv.deriv
+varimp_cv.deriv
+```
+
+
+```{r}
+# identify coefficients of CV models
+coef <- data.frame(coef(dparFullderiv.gam.cv$all_models[[1]]))
+
+# convert to matrix and calculate correlation coefficients
+coef_matrix <- as.matrix(coef)
+coef_corr <- cor(t(coef_matrix))
+
+# interactive heatmap
+heatmaply(coef_corr,
+          k_col = 5, k_row = 5, # Cluster columns and rows
+          colors = colorRampPalette(c("#3BB351", "#1EE6BE", "#6B8CDB", "#9E7BC9", "#C17BC9", "#F1A3BD"))(256),
+          main = "Fold 1",
+          xlab = "Feature index",
+          ylab = "Feature index")
+```
+
+
+### *FINAL MODEL*
+
+```{r}
+# create formula and control object with best hyperparameters
+model.settingsDeriv <- get.settings(dparFullDeriv_gam.df,
+                                best_hp_dparFullDeriv,
+                                mstop_max)
+# check formula and control
+# model.settings$formula
+# model.settings$control
+# model.settings$formula[[3]][[3]][[3]]  # show value for knots
+# model.settings$formula[[3]][[3]][[4]]  # show value for df
+
+
+# Training the final model with identified optimal hyperparameter configuration
+set.seed(936)
+system.time(gam_deriv_final <- gamboost(model.settingsDeriv$formula,
+                                    dparFullDeriv_gam.df,
+                                    control = model.settingsDeriv$control))
+# summary(deriv_final)
+
+save(gam_deriv_final, file="data/gam_deriv_final.RData")
+```
+
+
+#### **PREDICTIONS - final**
+
+```{r}
+# predict model
+predsDeriv.final <- predict(gam_deriv_final, dparFullDeriv_gam.df)
+# calculate residuals
+residsDeriv.final <- y_data - predsDeriv.final
+
+
+# calculate final metrics
+RMSEderiv.final <- calc.rmse(y_data, predsDeriv.final)
+R2deriv.final <- (cor(predsDeriv.final, y_data))^2
+MAEderiv.final <- mean(abs(y_data - predsDeriv.final))
+
+cat("Metrics final Model - DV data", "\n")
+cat("RMSE:", round(RMSEderiv.final, 2), "\n")
+cat("R2:", round(R2deriv.final, 2), "\n")
+cat("Mean absolute error:", round(MAEderiv.final, 2), "\n")
+```
+
+
+#### **Diagnostic plots final model**
+
+```{r}
+# create diagnostic plots for cross-validation results
+diag_final_deriv <- diagnostic.plots(preds = predsDeriv.final, targets = y_data)
+
+# extract plots
+plot1 <- diag_final_deriv$predictions_vs_targets
+plot2 <- diag_final_deriv$qq_plot
+plot3 <- diag_final_deriv$preds_vs_residuals
+plot4 <- diag_final_deriv$histogram_residuals
+
+# print all plots on a 2x2 figure
+(plot1 + plot2) / (plot3 + plot4)
+```
+
+
+
+#### **Permutation importance final model**
+
+```{r}
+# compute baseline predictions and RMSE for permutation importance
+baseline_preds_deriv_final <- predict(gam_deriv_final, newdata = x_data)
+baseline_rmse_deriv_final <- calc.rmse(y_data, baseline_preds_deriv_final)
+
+# Create an empty vector to store variable importance
+varImp_deriv_final <- numeric(1730)    # every second predictor: 3460/2
+names(varImp_deriv_final) <- colnames(dparFullDeriv_gam.df[-1])
+
+suppressWarnings({
+  set.seed(1258)
+  # compute permutation importance for each variable
+  for (i in seq_along(colnames(x_data))) {
+    cat("iteration", i, "\n")
+    # Permute the i-th variable
+    permuted_data <- x_data
+    permuted_data[, i] <- sample(permuted_data[, i])
+    
+    # Compute predictions and RMSE on permuted data
+    permuted_predictions <- predict(gam_deriv_final, newdata = permuted_data)
+    permuted_rmse <- calc.rmse(y_data, permuted_predictions)
+    
+    # Compute the increase in RMSE (risk reduction percentage)
+    varImp_deriv_final[i] <- ((permuted_rmse - baseline_rmse) / baseline_rmse) * 100
+    }
+})
+
+# Sort the variable importance in descending order
+varImp_deriv_final_sorted <- sort(varImp_deriv_final, decreasing = TRUE)
+
+# extract names of top15 BL for partial effect plots (need complete variable name)
+top10_BLderiv <- names(varImp_deriv_final_sorted)[1:10]
+
+# create data frame
+varimp_deriv_final.df <- data.frame(varImp_deriv_final_sorted)
+varimp_deriv_final.df$variable <- rownames(varimp_deriv_final.df)
+varimp_deriv_final.df <- varimp_deriv_final.df[, c(2, 1)]
+rownames(varimp_deriv_final.df) <- NULL
+colnames(varimp_deriv_final.df) <- c("variable", "importance")
+
+# remove all rows with 0
+varimp_deriv_final.df <- varimp_deriv_final.df[apply(varimp_deriv_final.df!=0, 1, all),]
+varimp_deriv_final.df$variable <- gsub("(\\d+\\.\\d{2})\\d*", "\\1", varimp_deriv_final.df$variable)
+
+# Create top15 varimp dataframe and category "others"
+top10_varImp_deriv_final.df <- rbind(
+    varimp_deriv_final.df[1:10,],
+    data.frame(variable = "others", importance = sum(varimp_deriv_final.df$importance[11:nrow(varimp_deriv_final.df)]))
+)
+```
+
+```{r}
+# calculate 10% threshold to identify variables of low importance
+deriv_final_low_imp <- calc.threshold(varimp_deriv_final.df)
+
+print(deriv_final_threshold <- deriv_final_low_imp$threshold)
+print(deriv_final_low_variables <- deriv_final_low_imp$low_scores)
+```
+
+
+```{r}
+# create plot for top15 predictors
+varimp10_deriv_final <-
+  top10_varImp_deriv_final.df %>%
+  mutate(variable = factor(variable, levels = rev(variable))) %>%
+  
+  ggplot( aes(
+    x = variable, y = importance, fill = variable)) +
+  geom_bar(stat = "identity") +
+  guides(fill = "none") +
+  labs(x = "") +
+  coord_flip() + 
+  labs(
+    x = "Base-learner",
+    y = "Increase in RMSE (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.8),
+    panel.grid.minor = element_line(color = "gray80", linewidth = 0.2),
+    axis.title.x = element_text(size = 30),
+    axis.title.y = element_text(size = 30),
+    axis.text.x = element_text(size = 28),
+    axis.text.y = element_text(size = 28)) +
+  scale_y_continuous(breaks = seq(0, 80, by = 5))
+
+# create plot for all predictors
+varimp_deriv_final <-
+  varimp_deriv_final.df %>%
+  mutate(variable = factor(variable, levels = rev(variable))) %>%
+
+  ggplot( aes(
+    x = variable, y = importance, fill = variable)) +
+  geom_bar(stat = "identity") +
+  geom_vline(xintercept = "X3848.31", col = "salmon", linetype = "dashed", linewidth = 2) +
+  annotate("text", x = "X1594.74", y = 16, label = "Top 10 Baselearner", vjust = -0.5, col = "mediumseagreen", size = 14) +
+  geom_hline(yintercept = seq(0, 22, 2), col = "grey65", linewidth = 0.7) +
+  guides(fill = "none") +
+  labs(x = "") +
+  coord_flip() +
+  labs(
+    x = "Base-learner",
+    y = "Increase in RMSE (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(size = 30),
+    axis.title.y = element_text(size = 30),
+    axis.text.x = element_text(size = 28)) +
+  scale_y_continuous(breaks = seq(0, 22, by = 2))
+
+# print plots
+varimp10_deriv_final
+varimp_deriv_final
+```
+
+
+#### **Partial effects plots**
+
+```{r, plot default model}
+# create partial effect plots of top4 BL
+par(mfrow = c(2,2), mar = c(4, 5, 1.5, 1.5))
+plot(gam_deriv_final, which = "X2518.3361",
+     col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+plot(gam_deriv_final, which = "X1721.9918399999999",
+     col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+plot(gam_deriv_final, which = "X974.90598799999998",
+     col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+plot(gam_deriv_final, which = "7456.4914829999998",
+     col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+# plot(gam_deriv_final, which = "X1586.5312180000001", col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+# plot(gam_deriv_final, which = "X1594.740953", col = "maroon1", rug = TRUE, rugcol = "#3BB351")
+```
+
+
+
+================================================================================
+================================================================================
+================================================================================
+
+
+
+## *Hyperparameter tuning - combined plots*
+
+```{r}
+# plot results of hyperparameter tungin from both datasets in one figure
+plot1 <- ggplot(dparFullOrig.tune) +
+  labs(title = "(a) Vector normalized spectral data") +
+  theme(plot.title = element_text(size = 11,
+                                  face = "bold", 
+                                  hjust = 0.5, vjust = -123)) +
+  geom_smooth(color = "hotpink", linewidth = 0.5, alpha = 0)
+
+plot2 <- ggplot(dparFullDeriv.tune) +
+  labs(title = "(b) Derivated spectral data") +
+  theme(plot.title = element_text(size = 11,
+                                  face = "bold", 
+                                  hjust = 0.5, vjust = -123)) +
+  geom_smooth(color = "hotpink", linewidth = 0.5, alpha = 0)
+
+plot1 / plot2
+```
+
+
+
+
+
